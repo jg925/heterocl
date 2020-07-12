@@ -14,6 +14,7 @@ from .tvm._api_internal import _ExternOp
 from .debug import DSLError, APIError
 from . import util
 from .devices import Device, DevMediaPair 
+from itertools import count
 
 class Schedule(object):
     """Create a compute schedule.
@@ -31,11 +32,17 @@ class Schedule(object):
 
     stage_ops = []
     last_stages = OrderedSet([])
+    _ids = count(0)
 
-    def __init__(self, sch, inputs):
+    def __init__(self, sch, inputs, name=""):
+        self.id = next(self._ids)
         self.sch = sch
         self.inputs = inputs
         self.placement = dict()
+        if self.id > 0 and name == "":
+            self.name = "s{}".format(self.id)
+        else:
+            self.name = name
 
     def __getitem__(self, stage):
         try:
@@ -115,7 +122,7 @@ class Schedule(object):
                                 channel.op.name, "<==", name)
 
                     # add children nodes to graph
-                    else: 
+                    else:
                         if plot:
                             print(name_with_prefix,  " <=== ", name)
                         graph.add_edge(name, name_with_prefix)
@@ -137,7 +144,7 @@ class Schedule(object):
             pos[stage.name_with_prefix] = (x, 0)
             x += 1
 
-        if plot: # draw the network 
+        if plot: # draw the network
             try:
                 from networkx.drawing.nx_agraph import graphviz_layout
             except ImportError:
@@ -153,12 +160,12 @@ class Schedule(object):
         assert len(inputs) > 0, "empty inputs"
         assert len(outputs) > 0, "empty outputs"
 
-        # check availability 
+        # check availability
         graph, op_map = self.dataflow_graph()
         inputs  = [ _.name for _ in inputs ]
         outputs = [ _.name for _ in outputs ]
 
-        # from root to parents 
+        # from root to parents
         stack = deepcopy(outputs)
         subgraph = list()
         while len(stack) > 0:
@@ -189,7 +196,7 @@ class Schedule(object):
             axis = post_stage.op.axis[axis_num-1]
             pre_stage.compute_at(post_stage, axis)
 
-        # split kernel 
+        # split kernel
         post_stage.split(post_stage.op.axis[0], factor)
         return post_stage
 
@@ -221,7 +228,7 @@ class Schedule(object):
         """
         try:
             target = target.tensor
-        except AttributeError:
+        except (AttributeError, ValueError):
             try:
                 target = target._op
             except AttributeError:
@@ -246,11 +253,11 @@ class Schedule(object):
                 target = dest._op
             elif isinstance(dest, tuple):
                 src, target = dest
-            else: # target tensor 
+            else: # target tensor
                 target = dest.tensor
         else: target = dest
 
-        for src in srcs: 
+        for src in srcs:
             if isinstance(src, tuple):
                 src, tensor = src
                 assert tensor == target, + \
@@ -268,9 +275,8 @@ class Schedule(object):
 
 
     def to(self, tensors, dst, src=None, axis=0,
-           stream_type=_expr.Stream.Copy, depth=1, name=None):
+           mode=_expr.IO.DMA, depth=1, local_buffer=True, name=None):
         """Stream a list of Tensors to dst devices 
-        
         Parameters
         ----------
         tensors : list of Tensor
@@ -285,29 +291,32 @@ class Schedule(object):
         axis : axis index
             Move axis-th loop body to xcel scope
 
-        stream_type : data movement type
-            The types of data movement. Can support FIFO,
-            Copy and DoubleBuffer modes
+        mode : data movement type
+            The modes of data movement (FIFO, DMA, MMIO)
+            For inter-kernel data movemnet, only FIFO is supported
 
         depth : channel depth
             The streaming channel depth
 
+        local_buffer : boolean 
+            create local buffer for data on-device
+
         """
-        if stream_type > 2:
+        if mode not in [ _expr.IO.DMA, _expr.IO.FIFO ]:
             raise APIError("Invalid channel type")
-        rets = []
+        rets = list()
         if not isinstance(tensors, list):
             tensors = [tensors]
         for tensor in tensors:
             try:
                 if isinstance(tensor, Stage):
                     target = tensor._op
-                # unpack tuple of src stage and tensor 
+                # unpack tuple of src stage and tensor
                 elif isinstance(tensor, tuple):
                     src, target = tensor
                     # from hcl stage to tvm stage
                     src = self.__getitem__(src)
-                else: # target tensor 
+                else: # target tensor
                     target = tensor.tensor
             except (AttributeError, ValueError):
                 target = tensor
@@ -321,9 +330,9 @@ class Schedule(object):
                 # move to device
                 if isinstance(dst, Device) or \
                         isinstance(dst, DevMediaPair):
-                    if axis == 0: 
+                    if axis == 0:
                         move_to_device = True
-                    else: # inner-stage movement  
+                    else: # inner-stage movement
                         assert isinstance(tensor, Stage)
                         target = self[tensor]
 
@@ -331,9 +340,8 @@ class Schedule(object):
                     src = self[tensor]
 
             # target can be stage or tensor
-            ret = self.sch.to(target, dst, src, axis,
-                              stream_type, depth)
-            # record the placement information 
+            ret = self.sch.to(target, dst, src, axis, mode, depth, local_buffer)
+            # record the placement information
             if move_to_device:
                 channel, ret = ret
                 self.placement[target.name] = \
@@ -568,7 +576,7 @@ class Stage(object):
                 for stage in self.input_stages:
                     if stage.name == name:
                         return (self, stage._op)
-                # check tensors in input_stage.lhs 
+                # check tensors in input_stage.lhs
                 for stage in self.input_stages:
                     lhs = stage.lhs_tensors
                     for tensor in lhs:
