@@ -256,6 +256,15 @@ def opengl(options=None):
     """
     return Target("opengl", options)
 
+def pynq(options=None):
+    """Returns a PYNQ target.
+
+    Parameters
+    ----------
+    options : list of str
+        Additional options 
+    """
+    return Target("pynq", options)
 
 def create(target_str):
     """Get a target given target string.
